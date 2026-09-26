@@ -1,627 +1,506 @@
 /*
- * どうぶつ戦国 陣取り合戦
- *   ステップ1：ヘクスマップ基盤 / 2：包囲 / 3：武将の技 / 4：地形 / 5：武将選択
+ * どうぶつ戦国 陣取り合戦 v2 — 画面の司令塔
  *
  * ファイル構成：
- *   hex.js      … ヘクス座標の計算（隣接・距離・点対称）
- *   terrain.js  … 地形の定義とランダムマップ生成
- *   generals.js … 武将の名簿
- *   skills.js   … 武将の技
- *   screens.js  … 武将選択画面・結果画面（見た目は screens.css）
- *   game.js     … ルール・描画・操作（このファイル）
+ *   hex.js / terrain.js … ヘクス座標・地形
+ *   units.js            … 兵種と命令
+ *   generals.js         … 武将の名簿と編成
+ *   skills.js           … 武将の技の説明
+ *   battle.js           … 合戦のルール（画面なし・テストは tests/）
+ *   render.js           … 盤面の描画
+ *   panel.js            … 画面下の操作パネル
+ *   screens.js/.css     … 武将選択・交代・結果・確認の画面
+ *   sound.js            … 効果音と振動
+ *   game.js             … それらをつなぐ（このファイル）
  */
 (() => {
   'use strict';
 
-  const { sameHex, hexKey } = Hex;
-  const { TERRAINS } = Terrain;
+  const { sameHex } = Hex;
+  const { UNIT_TYPES, ORDERS, ORDER_KEYS } = Units;
+  const { SKILLS } = Skills;
 
-  // ===== 設定 =====
-  const COLS = 9;
-  const ROWS = 9;
-  const MAX_ROUNDS = 20;        // 各プレイヤーの手番数。全て終わったら得点で勝敗判定
-  const BOARD_PADDING = 12;     // キャンバス端とマップの余白(px)
-  const TOAST_MS = 900;
-  const CAPTURE_TOAST_MS = 1300;
-  const CAPTURE_POP_MS = 420;     // 包囲マスが弾むアニメーションの長さ
-  const CAPTURE_STAGGER_MS = 45;  // マスごとの演出開始のずれ
-  const SKILL_COLOR = '#f5b400';        // 技モードのハイライト（金）
-  const SKILL_COLOR_LIGHT = '#ffe38a';
-
-  const grid = Hex.createGrid(COLS, ROWS);
-  const { neighbors } = grid;
-
-  // 陣（先手=赤 / 後手=青）。色と初期位置は陣で決まり、武将は選択画面で選ぶ
   const SEATS = [
-    { id: 0, label: '赤の陣', color: '#e8453c', light: '#ffb3a8', dark: '#a82a22', start: { col: 0, row: 4 } },
-    { id: 1, label: '青の陣', color: '#2f7de1', light: '#a9cdfb', dark: '#1d4f94', start: { col: COLS - 1, row: 4 } },
+    { id: 0, label: '赤の陣', dot: '🔴', color: '#e8453c', light: '#ffb3a8', dark: '#a82a22' },
+    { id: 1, label: '青の陣', dot: '🔵', color: '#2f7de1', light: '#a9cdfb', dark: '#1d4f94' },
   ];
-  /** 陣 + 選ばれた武将（name, emoji, skill, sprite …）を合わせたプレイヤー情報 */
-  const buildPlayers = (generalKeys) => SEATS.map((seat, i) => ({ ...Generals.byKey(generalKeys[i]), ...seat }));
-  let players = buildPlayers(['nobu', 'shin']);
 
-  // ▼ 領地の塗り用イラストの差し替えポイント（地形ごとの絵は terrain.js の sprite で設定）
-  const TILE_SPRITES = {
-    neutral: null,   // 例) 'img/tile_grass.png'
-    p0: null,        // 例) 'img/tile_red_flag.png'
-    p1: null,        // 例) 'img/tile_blue_flag.png'
+  // アニメーションの長さ（ミリ秒）
+  const EVENT_MS = {
+    move: 170, attack: 380, counter: 320, destroyed: 400, capture: 420,
+    enclose: 520, item: 420, heal: 380, order: 150, itemSpawn: 520,
+  };
+  const POPUP_MS = 950;
+  const FLASH_MS = 2200;
+  const FAST_SPEED = 4;
+  const MOVE_SOUND_GAP_MS = 110;
+
+  const ATTACK_LABEL = (a) => (a >= 0.4 ? 'とても強' : a >= 0.3 ? '強' : a >= 0.25 ? '普通' : '弱');
+
+  // ===== 状態 =====
+  let players = [];
+  let state = null;
+  const ui = {
+    selectedId: null,
+    targeting: null,        // 'advance' | 'attack' | 'fort'
+    flash: null,            // { text, until }
+    playing: null,          // 行動アニメの再生状態
+    popups: [],
+    lastMoveSoundAt: 0,
   };
 
-  // ===== 画像ローダー（未設定・読み込み失敗時は null を返し、フォールバック描画される） =====
-  const imageCache = new Map();
-  function getImage(src) {
-    if (!src) return null;
-    if (!imageCache.has(src)) {
-      const img = new Image();
-      img.onload = () => requestRender();
-      img.onerror = () => console.warn(`画像を読み込めませんでした: ${src}`);
-      img.src = src;
-      imageCache.set(src, img);
-    }
-    const img = imageCache.get(src);
-    return img.complete && img.naturalWidth > 0 ? img : null;
-  }
+  const buildPlayers = (keys) => SEATS.map((seat, i) => ({ ...Generals.byKey(keys[i]), ...seat }));
+  const viewOf = (s) => ({ terrain: s.terrain, owners: s.owners, units: s.units, items: s.items });
+  const seatOfUnitId = (id) => Number(String(id)[0]);
 
-  // ===== 盤面の参照ヘルパー =====
-  const myPos = (state) => state.positions[state.current];
-  const enemyPos = (state) => state.positions[1 - state.current];
-  const terrainKeyAt = (state, h) => state.terrain[h.row][h.col];
-  const terrainAt = (state, h) => TERRAINS[terrainKeyAt(state, h)];
-  const isWalkable = (state, h) => terrainAt(state, h).walkable;
-  /** 武将が入れる（山でなく、相手武将もいない）マス */
-  const isEnterable = (state, h) => isWalkable(state, h) && !sameHex(h, enemyPos(state));
-
-  function legalMoves(state) {
-    if (state.isOver) return [];
-    return neighbors(myPos(state)).filter((h) => isEnterable(state, h));
-  }
-
-  // ===== 武将の技（中身は skills.js） =====
-  const SKILLS = Skills.create({ grid, myPos, isEnterable, legalMoves, terrainKeyAt });
-  const skillOf = (playerId) => SKILLS[players[playerId].skill];
-
-  // ===== ゲーム状態（更新は常に新しいオブジェクトを返す） =====
-  function createInitialState() {
-    const owners = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
-    SEATS.forEach((s) => { owners[s.start.row][s.start.col] = s.id; });
-    return {
-      terrain: Terrain.generate(grid, SEATS.map((s) => s.start)),  // terrain[row][col] = TERRAINS のキー
-      owners,                                  // owners[row][col] = playerId | null
-      positions: SEATS.map((s) => ({ ...s.start })),
-      current: 0,
-      turn: 1,                                 // 通算手数(1始まり)
-      isOver: false,
-      skillUsed: SEATS.map(() => false),
-      lastCaptured: [],
-      lastSkillPaint: [],
-      lastCastles: 0,
-      lastPassed: false,
-      lastExtraTurn: false,
-    };
-  }
-
-  const canUseSkill = (state) => !state.isOver && !state.skillUsed[state.current];
-
-  /** owners の指定マス群を pid の色に塗った新しい盤面を返す */
-  function paintCells(owners, cells, pid) {
-    const keys = new Set(cells.map(hexKey));
-    return owners.map((row, r) => row.map((o, c) => (keys.has(hexKey({ col: c, row: r })) ? pid : o)));
-  }
-
-  /**
-   * 包囲判定：pid の領地（と山）で完全に囲まれた「pid 以外のマスのかたまり」を返す。
-   *   - 山は通れない「壁」として扱う（山そのものは取れない）
-   *   - かたまりがマップ外周に触れていたら包囲ではない（外へ逃げ道がある）
-   *   - 相手武将がいるかたまりは取れない（武将は捕まえられない）
-   *   - 空白マスだけでなく、中にある相手の領地も奪える
-   */
-  function findEnclosedCells(terrain, owners, pid, protectedHexes) {
-    const isOpen = (h) => TERRAINS[terrain[h.row][h.col]].walkable && owners[h.row][h.col] !== pid;
-    const visited = new Set();
-    const captured = [];
-    grid.all.filter(isOpen).forEach((start) => {
-      if (visited.has(hexKey(start))) return;
-
-      // 幅優先探索で「開いている」マスの連結成分を集める
-      const region = [];
-      const queue = [start];
-      visited.add(hexKey(start));
-      while (queue.length > 0) {
-        const hex = queue.shift();
-        region.push(hex);
-        neighbors(hex)
-          .filter((n) => isOpen(n) && !visited.has(hexKey(n)))
-          .forEach((n) => { visited.add(hexKey(n)); queue.push(n); });
-      }
-
-      const touchesEdge = region.some(grid.isEdge);
-      const hasGeneral = region.some((h) => protectedHexes.some((p) => sameHex(p, h)));
-      if (!touchesEdge && !hasGeneral) captured.push(...region);
-    });
-    return captured;
-  }
-
-  const isStuck = (state) => legalMoves(state).length === 0
-    && (!canUseSkill(state) || skillOf(state.current).targets(state).length === 0);
-
-  /**
-   * 手番を相手に渡す。相手が動けない（技も使えない）なら自動でパスして戻す。
-   * 両者とも動けなければその時点で終戦。
-   */
-  function advanceTurn(state, passes = 0) {
-    const turn = state.turn + 1;
-    const next = { ...state, current: 1 - state.current, turn, isOver: turn > MAX_ROUNDS * SEATS.length };
-    if (next.isOver || !isStuck(next)) return { ...next, lastPassed: passes > 0 };
-    if (passes >= 1) return { ...next, isOver: true, lastPassed: true };
-    return advanceTurn(next, passes + 1);
-  }
-
-  /** build 指定があれば地形を書き換えた新しい地形マップを返す */
-  function applyBuild(terrain, build) {
-    if (!build) return terrain;
-    return terrain.map((row, r) => row.map((t, c) => (sameHex({ col: c, row: r }, build.hex) ? build.terrain : t)));
-  }
-
-  /**
-   * 1手を実行した新しい状態を返す。通常移動も技もここを通る。
-   * @param {{ moveTo: {col:number,row:number}, paint: {col:number,row:number}[],
-   *           extraTurn?: boolean, build?: { hex: {col:number,row:number}, terrain: string } }} action
-   * @param {boolean} isSkill 技を使った手かどうか
-   */
-  function applyAction(state, action, isSkill) {
-    const pid = state.current;
-    const paint = action.paint.filter((h) => isWalkable(state, h));
-    const terrain = applyBuild(state.terrain, action.build);
-    const painted = paintCells(state.owners, paint, pid);
-    const positions = state.positions.map((pos, i) => (i === pid ? { ...action.moveTo } : pos));
-    const enemyGenerals = positions.filter((_, i) => i !== pid);
-    const captured = findEnclosedCells(terrain, painted, pid, enemyGenerals);
-    const gained = [...paint, ...captured].filter((h) => state.owners[h.row][h.col] !== pid);
-    const acted = {
-      ...state,
-      terrain,
-      owners: paintCells(painted, captured, pid),
-      positions,
-      skillUsed: state.skillUsed.map((used, i) => used || (isSkill && i === pid)),
-      lastCaptured: captured,                        // 演出用：直前の手で包囲したマス
-      lastSkillPaint: isSkill ? paint : [],          // 演出用：技で塗ったマス
-      // 元から城だったマスを取った数（一夜城で建てた城は「落とした」に数えない）
-      lastCastles: gained.filter((h) => state.terrain[h.row][h.col] === 'castle').length,
-      lastPassed: false,
-      lastExtraTurn: false,
-    };
-    // 続けてもう1手（二段構え）。ただし動ける場所が無ければ普通に手番交代
-    if (action.extraTurn && legalMoves(acted).length > 0) return { ...acted, lastExtraTurn: true };
-    return advanceTurn(acted);
-  }
-
-  const applyMove = (state, target) => applyAction(state, { moveTo: target, paint: [target] }, false);
-  const applySkill = (state, target) => applyAction(state, skillOf(state.current).resolve(state, target), true);
-
-  /** 各プレイヤーの得点（地形ごとの value の合計。城は1マスで3点） */
-  function countScore(state) {
-    const scores = SEATS.map(() => 0);
-    grid.all.forEach((h) => {
-      const o = state.owners[h.row][h.col];
-      if (o !== null) scores[o] += terrainAt(state, h).value;
-    });
-    return scores;
-  }
-
-  // ===== レイアウト（画面サイズに合わせてヘクスの大きさを自動計算） =====
-  const canvas = document.getElementById('board');
-  const ctx = canvas.getContext('2d');
-  const SQRT3 = Math.sqrt(3);
-  let layout = { size: 20, originX: 0, originY: 0, cssW: 0, cssH: 0 };
-
-  function computeLayout() {
-    const rect = canvas.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.round(rect.width * dpr);
-    canvas.height = Math.round(rect.height * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-    const availW = rect.width - BOARD_PADDING * 2;
-    const availH = rect.height - BOARD_PADDING * 2;
-    // pointy-top: 幅 = √3·size·(COLS + 0.5)、高さ = size·(1.5·(ROWS-1) + 2)
-    const size = Math.max(4, Math.min(
-      availW / (SQRT3 * (COLS + 0.5)),
-      availH / (1.5 * (ROWS - 1) + 2),
-    ));
-    const boardW = SQRT3 * size * (COLS + 0.5);
-    const boardH = size * (1.5 * (ROWS - 1) + 2);
-    layout = {
-      size,
-      originX: (rect.width - boardW) / 2 + (SQRT3 * size) / 2,
-      originY: (rect.height - boardH) / 2 + size,
-      cssW: rect.width,
-      cssH: rect.height,
-    };
-  }
-
-  function hexCenter({ col, row }) {
-    const { size, originX, originY } = layout;
-    return {
-      x: originX + SQRT3 * size * (col + 0.5 * (row & 1)),
-      y: originY + 1.5 * size * row,
-    };
-  }
-
-  /** タップ位置 → ヘクス。最も近い中心を持つヘクスが該当（ヘクス格子のボロノイ性質） */
-  function pixelToHex(x, y) {
-    let best = null;
-    let bestDist = Infinity;
-    for (let row = 0; row < ROWS; row += 1) {
-      for (let col = 0; col < COLS; col += 1) {
-        const c = hexCenter({ col, row });
-        const d = (c.x - x) ** 2 + (c.y - y) ** 2;
-        if (d < bestDist) { bestDist = d; best = { col, row }; }
-      }
-    }
-    return bestDist <= layout.size ** 2 ? best : null;
-  }
-
-  // ===== 描画 =====
-  function hexPath(cx, cy, size) {
-    ctx.beginPath();
-    for (let i = 0; i < 6; i += 1) {
-      const angle = (Math.PI / 180) * (60 * i - 30);
-      const px = cx + size * Math.cos(angle);
-      const py = cy + size * Math.sin(angle);
-      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-    }
-    ctx.closePath();
-  }
-
-  /**
-   * @param {null|'move'|'skill'|'preview'} mark
-   *   move=通常の移動先 / skill=技の対象マス / preview=技の効果範囲（点線）
-   */
-  function drawClippedImage(img, x, y, inner) {
-    ctx.save();
-    hexPath(x, y, inner);
-    ctx.clip();
-    ctx.drawImage(img, x - inner, y - inner, inner * 2, inner * 2);
-    ctx.restore();
-  }
-
-  function drawTerrainIcon(terrain, x, y, s) {
-    const img = getImage(terrain.sprite);
-    if (img) {
-      drawClippedImage(img, x, y, s * 0.92);
-      return;
-    }
-    ctx.font = `${Math.round(s * 0.95)}px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(terrain.icon, x, y + s * 0.06);
-  }
-
-  function tileFill(hex, player, terrain) {
-    if (player) return player.color;
-    if (terrain.base) return terrain.base;
-    return ((hex.col + hex.row) & 1) ? '#f4e2b8' : '#efd9a8';
-  }
-
-  /**
-   * @param {null|'move'|'skill'|'preview'} mark
-   *   move=通常の移動先 / skill=技の対象マス / preview=技の効果範囲（点線）
-   */
-  function drawTile(hex, owner, terrainKey, mark, pulse, popT = 1) {
-    const { x, y } = hexCenter(hex);
-    const s = layout.size;
-    const inner = s * 0.92 * popScale(popT);
-    const player = owner === null ? null : players[owner];
-    const terrain = TERRAINS[terrainKey];
-    const isMountain = !terrain.walkable;
-
-    // 影（ポップな立体感。山は少し高く盛り上げる）
-    hexPath(x, y + s * (isMountain ? 0.16 : 0.08), inner);
-    ctx.fillStyle = player ? player.dark : (isMountain ? '#6f8456' : '#c9b48a');
-    ctx.fill();
-
-    // 本体
-    hexPath(x, y, inner);
-    ctx.fillStyle = tileFill(hex, player, terrain);
-    ctx.fill();
-
-    // ▼ 領地イラストを重ねる（TILE_SPRITES に PNG を設定した場合のみ）
-    const tileImg = getImage(TILE_SPRITES[player ? `p${owner}` : 'neutral']);
-    if (tileImg && terrain.walkable) drawClippedImage(tileImg, x, y, inner);
-
-    // 城は金の縁取りで「得点が高いマス」だと分かるように
-    if (terrainKey === 'castle') {
-      hexPath(x, y, inner * 0.9);
-      ctx.lineWidth = Math.max(2, s * 0.08);
-      ctx.strokeStyle = SKILL_COLOR;
-      ctx.stroke();
-    }
-    if (terrain.icon || terrain.sprite) drawTerrainIcon(terrain, x, y, inner);
-
-    if (mark === 'move' || mark === 'skill') {
-      const me = players[state.current];
-      const isSkill = mark === 'skill';
-      hexPath(x, y, inner * (0.78 + 0.06 * pulse));
-      ctx.fillStyle = isSkill ? `${SKILL_COLOR_LIGHT}dd` : `${me.light}cc`;
-      ctx.fill();
-      ctx.lineWidth = Math.max(2, s * 0.09);
-      ctx.strokeStyle = isSkill ? SKILL_COLOR : me.color;
-      ctx.stroke();
-    } else if (mark === 'preview') {
-      hexPath(x, y, inner * 0.8);
-      ctx.setLineDash([s * 0.18, s * 0.12]);
-      ctx.lineDashOffset = -pulse * s * 0.6;
-      ctx.lineWidth = Math.max(2, s * 0.08);
-      ctx.strokeStyle = SKILL_COLOR;
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-  }
-
-  function drawGeneral(player, hex, isGlowing, pulse) {
-    const { x, y } = hexCenter(hex);
-    const r = layout.size * 0.62;
-
-    // 技の発動対象（自分をタップ）のときは金色のオーラ
-    if (isGlowing) {
-      ctx.beginPath();
-      ctx.arc(x, y, r * (1.18 + 0.12 * pulse), 0, Math.PI * 2);
-      ctx.fillStyle = `${SKILL_COLOR}99`;
-      ctx.fill();
-    }
-
-    ctx.beginPath();
-    ctx.arc(x, y + r * 0.12, r, 0, Math.PI * 2);
-    ctx.fillStyle = '#00000033';
-    ctx.fill();
-
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fillStyle = '#fff';
-    ctx.fill();
-    ctx.lineWidth = Math.max(2, layout.size * 0.1);
-    ctx.strokeStyle = player.dark;
-    ctx.stroke();
-
-    // ▼ 武将イラスト：generals.js の sprite に PNG を設定すると、絵文字の代わりに描画
-    const img = getImage(player.sprite);
-    if (img) {
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(x, y, r * 0.92, 0, Math.PI * 2);
-      ctx.clip();
-      ctx.drawImage(img, x - r, y - r, r * 2, r * 2);
-      ctx.restore();
-    } else {
-      ctx.font = `${Math.round(r * 1.25)}px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(player.emoji, x, y + r * 0.08);
-    }
-  }
-
-  /** 包囲演出：0→1 の進行度から、ぽよんと弾む拡大率を返す（easeOutBack） */
-  function popScale(t) {
-    if (t >= 1) return 1;
-    const c = 1.9;
-    const u = t - 1;
-    return 0.4 + 0.6 * (1 + (c + 1) * u ** 3 + c * u ** 2);
-  }
-
-  // 包囲されたマスの演出タイミング（マスごとに少しずつずらして波のように）
-  let captureAnim = { keys: new Map(), startedAt: 0 };
-  function startCaptureAnim(cells) {
-    const keys = new Map(cells.map((h, i) => [hexKey(h), i * CAPTURE_STAGGER_MS]));
-    captureAnim = { keys, startedAt: performance.now() };
-  }
-  function capturePopT(hex, now) {
-    const delay = captureAnim.keys.get(hexKey(hex));
-    if (delay === undefined) return 1;
-    return Math.max(0, Math.min(1, (now - captureAnim.startedAt - delay) / CAPTURE_POP_MS));
-  }
-
-  function render(now) {
-    ctx.clearRect(0, 0, layout.cssW, layout.cssH);
-    const pulse = (Math.sin(now / 250) + 1) / 2;
-    const targets = currentTargets();
-    const previews = isSkillMode ? skillOf(state.current).preview(state) : [];
-    const has = (list, h) => list.some((m) => sameHex(m, h));
-    const markOf = (h) => {
-      if (has(targets, h)) return isSkillMode ? 'skill' : 'move';
-      return has(previews, h) ? 'preview' : null;
-    };
-
-    grid.all.forEach((hex) => {
-      drawTile(hex, state.owners[hex.row][hex.col], state.terrain[hex.row][hex.col], markOf(hex), pulse, capturePopT(hex, now));
-    });
-    players.forEach((p, i) => {
-      const pos = state.positions[i];
-      drawGeneral(p, pos, isSkillMode && i === state.current && has(targets, pos), pulse);
-    });
-  }
-
-  // 移動可能マスの点滅のため常時ループ（盤面が小さいので負荷は軽い）
-  let rafId = 0;
-  function loop(now) {
-    render(now);
-    rafId = requestAnimationFrame(loop);
-  }
-  function requestRender() {
-    if (!rafId) rafId = requestAnimationFrame(loop);
-  }
-
-  // ===== UI =====
-  const el = {
-    p1Panel: document.getElementById('p1Panel'),
-    p2Panel: document.getElementById('p2Panel'),
-    p1Score: document.getElementById('p1Score'),
-    p2Score: document.getElementById('p2Score'),
-    turnInfo: document.getElementById('turnInfo'),
-    toast: document.getElementById('toast'),
-    reset: document.getElementById('resetBtn'),
-    skill: document.getElementById('skillBtn'),
-    skillName: document.getElementById('skillName'),
-    skillDesc: document.getElementById('skillDesc'),
-    skillBadges: [document.getElementById('p1Skill'), document.getElementById('p2Skill')],
-    faces: [document.getElementById('p1Emoji'), document.getElementById('p2Emoji')],
-    names: [document.getElementById('p1Name'), document.getElementById('p2Name')],
-  };
-  const RESULT_DELAY_MS = 1100;   // 最後の一手を見せてから結果画面を出すまでの間
-  const FOLLOWUP_SOUND_MS = 220;  // 移動音のあと、包囲・城などの音を鳴らすまでの間
-  const SKILL_SOUND_MS = 350;     // 技の太鼓が鳴り終わるのを待つ分
-  let isSkillMode = false;   // UI 状態：技ボタンを押して対象マスを選んでいる最中か
-
-  function currentTargets() {
-    if (state.isOver) return [];
-    return isSkillMode ? skillOf(state.current).targets(state) : legalMoves(state);
-  }
+  // ===== DOM =====
+  const $ = (id) => document.getElementById(id);
+  const canvas = $('board');
+  const board = Render.create(canvas, Battle.grid, { seats: SEATS, padding: 6 });
+  const hud = [0, 1].map((i) => ({
+    panel: $(`p${i + 1}Panel`), face: $(`p${i + 1}Emoji`), name: $(`p${i + 1}Name`),
+    troops: $(`p${i + 1}Troops`), bar: $(`p${i + 1}Bar`), score: $(`p${i + 1}Score`),
+  }));
+  const turnInfo = $('turnInfo');
+  const toast = $('toast');
   let toastTimer = 0;
 
-  /** durationMs に null を渡すとタップされるまで表示し続ける */
-  function showToast(text, cls, durationMs = TOAST_MS) {
+  function showToast(text, seat, ms = 1400) {
     clearTimeout(toastTimer);
-    el.toast.textContent = text;
-    el.toast.className = `show ${cls}`;
-    if (durationMs !== null) toastTimer = setTimeout(() => { el.toast.className = ''; }, durationMs);
+    toast.textContent = text;
+    toast.className = `show p${seat + 1}`;
+    toastTimer = setTimeout(() => { toast.className = ''; }, ms);
   }
 
+  function flash(text) {
+    ui.flash = { text, until: performance.now() + FLASH_MS };
+    renderPanel();
+    setTimeout(renderPanel, FLASH_MS + 50);
+  }
+
+  // ===== 上部の表示 =====
   function updateHud() {
-    const [s1, s2] = countScore(state);
-    el.p1Score.textContent = s1;
-    el.p2Score.textContent = s2;
-    el.p1Panel.classList.toggle('active', !state.isOver && state.current === 0);
-    el.p2Panel.classList.toggle('active', !state.isOver && state.current === 1);
-    const round = Math.ceil(state.turn / SEATS.length);
-    el.turnInfo.textContent = state.isOver ? '終戦' : `${Math.min(round, MAX_ROUNDS)} / ${MAX_ROUNDS}\n手目`;
-    updateSkillUi();
+    if (!state) return;
+    [0, 1].forEach((seat) => {
+      const p = players[seat];
+      const h = hud[seat];
+      const troops = Battle.armyTroops(state, seat);
+      h.face.textContent = p.emoji;
+      h.name.textContent = p.name;
+      h.troops.textContent = troops;
+      h.bar.style.width = `${Math.min(100, (troops / Generals.totalTroops(p)) * 100)}%`;
+      h.score.textContent = `${Battle.score(state, seat).total}点`;
+      h.panel.classList.toggle('active', state.phase !== 'over' && state.current === seat);
+    });
+    turnInfo.textContent = state.phase === 'deploy' ? '布陣' : state.phase === 'over' ? '終戦' : `${state.turn}/${Battle.CONFIG.maxTurns}`;
   }
 
-  function updatePlayerPanels() {
-    players.forEach((p, i) => {
-      el.faces[i].textContent = p.emoji;
-      el.names[i].textContent = p.name;
-    });
+  // ===== 操作パネル =====
+  const panel = Panel.create($('panel'), { onOrder, onAction });
+
+  function unitCardModel(unit) {
+    const type = UNIT_TYPES[unit.type];
+    const own = unit.seat === state.current && !ui.playing && state.phase !== 'over';
+    const player = players[unit.seat];
+    return {
+      own,
+      icon: unit.type === 'general' ? player.emoji : type.icon,
+      name: unit.type === 'general' ? `${player.name}（本陣）` : `${type.name}隊`,
+      troops: unit.troops,
+      maxTroops: unit.maxTroops,
+      stats: `移動${type.move}・射程${type.range}・攻撃${ATTACK_LABEL(type.attack)}${unit.powder ? '・💥火薬あり' : ''}`,
+      limits: type.limits,
+      currentOrder: unit.order.kind,
+      orders: ORDER_KEYS.map((key) => ({
+        key, icon: ORDERS[key].icon, name: ORDERS[key].name, desc: ORDERS[key].desc,
+        blocked: Battle.orderBlockedReason(state, unit.id, key),
+      })),
+    };
   }
 
-  function updateSkillUi() {
-    players.forEach((p, i) => {
-      const badge = el.skillBadges[i];
-      badge.textContent = skillOf(i).icon;
-      badge.classList.toggle('used', state.skillUsed[i]);
-      badge.title = state.skillUsed[i] ? '技：使用済み' : `技：${skillOf(i).name}`;
-    });
+  const TARGET_HINT = {
+    advance: '進軍先のマスをタップ（山と、入れない地形は選べない）',
+    attack: '狙う敵部隊をタップ',
+    fort: SKILLS.fort.hint,
+  };
 
-    const skill = skillOf(state.current);
-    const isAvailable = canUseSkill(state);
-    el.skill.disabled = !isAvailable && !state.isOver;
-    el.skill.dataset.player = state.isOver ? 'end' : String(state.current + 1);
-    el.skill.classList.toggle('armed', isSkillMode);
-    if (state.isOver) {
-      el.skillName.textContent = '🏆 結果を見る';
-      el.skillDesc.textContent = '合戦終了';
-    } else if (isSkillMode) {
-      el.skillName.textContent = 'やめる';
-      el.skillDesc.textContent = skill.hint;
-    } else {
-      el.skillName.textContent = `${skill.icon} ${skill.name}`;
-      el.skillDesc.textContent = isAvailable ? skill.desc : '使用済み（1回まで）';
+  function panelModel() {
+    const seat = state.current;
+    const base = { seat, seatLabel: `${SEATS[seat].dot} ${players[seat].name}` };
+    const flashText = ui.flash && ui.flash.until > performance.now() ? ui.flash.text : null;
+    if (ui.playing) {
+      return {
+        ...base, phaseLabel: '行動中', commands: null, unit: null, skill: null, targeting: null,
+        hint: flashText ?? '部隊が命令どおりに動いています…',
+        main: { label: ui.playing.speed > 1 ? '⏭ 最後までとばす' : '⏩ 早送り', action: 'fastForward' },
+      };
     }
+    if (state.phase === 'over') {
+      return { ...base, phaseLabel: '合戦終了', hint: '', main: { label: '🏆 結果を見る', action: 'showResult' } };
+    }
+    const selected = ui.selectedId ? Battle.unitById(state, ui.selectedId) : null;
+    const skillKey = players[seat].skill;
+    const skill = {
+      ...SKILLS[skillKey],
+      blocked: state.phase === 'deploy' ? '合戦が始まってから使える' : Battle.skillBlockedReason(state),
+    };
+    const isDeploy = state.phase === 'deploy';
+    let hint;
+    if (ui.targeting) hint = TARGET_HINT[ui.targeting];
+    else if (selected && selected.seat === seat) {
+      hint = isDeploy
+        ? '明るいマスをタップで移動。命令も決めておこう（布陣中は何度でも変更OK）'
+        : `いまの命令：${ORDERS[selected.order.kind].icon}${ORDERS[selected.order.kind].name} — ${ORDERS[selected.order.kind].desc}`;
+    } else hint = isDeploy ? '部隊をタップして選ぶ' : '部隊をタップして命令を変える。決めたら「行動開始」';
+
+    const main = ui.targeting
+      ? { label: 'やめる', action: 'cancelTarget' }
+      : isDeploy ? { label: '布陣完了 ✓', action: 'finishDeploy' } : { label: '⚔️ 行動開始', action: 'endTurn' };
+    return {
+      ...base,
+      phaseLabel: isDeploy ? '布陣' : '命令',
+      commands: isDeploy ? null : { left: Battle.commandsLeft(state), limit: Battle.commandLimit(state) },
+      unit: selected ? unitCardModel(selected) : null,
+      skill,
+      targeting: ui.targeting,
+      hint: flashText ?? hint,
+      main,
+      sub: ui.targeting === 'attack' ? { label: '一番近い敵を狙う', action: 'nearestEnemy' } : null,
+    };
   }
 
-  function announceTurn() {
-    const p = players[state.current];
-    showToast(`${p.emoji} ${p.name}の番！`, `p${state.current + 1}`);
+  function renderPanel() {
+    if (state) panel.render(panelModel());
   }
 
-  /** 技・包囲・城取り・パスがあった手の実況。何もなければ通常の手番表示 */
-  function announceAction(moverId, isSkill) {
-    const lines = [];
-    const p = players[moverId];
-    if (isSkill) lines.push(`${skillOf(moverId).icon} ${skillOf(moverId).name}！`);
-    if (state.lastCaptured.length > 0) lines.push(`${p.emoji} 包囲！ +${state.lastCaptured.length}マス`);
-    if (state.lastCastles > 0) lines.push(`🏯 城を${state.lastCastles > 1 ? `${state.lastCastles}つ` : ''}落とした！`);
-    if (state.lastPassed) lines.push(`${players[1 - moverId].emoji} 動けない…パス！`);
-    if (lines.length === 0) {
-      announceTurn();
+  function refresh() {
+    updateHud();
+    renderPanel();
+  }
+
+  // ===== 盤面の見た目 =====
+  function highlightsFor(selected) {
+    if (ui.targeting === 'attack') {
+      return state.units.filter((u) => u.seat !== state.current).map((u) => ({ hex: u.pos, style: 'enemy' }));
+    }
+    if (ui.targeting === 'fort') return Battle.fortTargets(state).map((hex) => ({ hex, style: 'target' }));
+    if (state.phase === 'deploy' && selected?.seat === state.current && !ui.targeting) {
+      return Battle.deployZone(state.current)
+        .filter((h) => !Battle.deployBlockedReason(state, selected.id, h) && !sameHex(h, selected.pos))
+        .map((hex) => ({ hex, style: 'move' }));
+    }
+    return [];
+  }
+
+  function baseOverlay() {
+    const selected = ui.selectedId ? Battle.unitById(state, ui.selectedId) : null;
+    const showOrders = !ui.playing && state.phase !== 'over';
+    const destination = selected && selected.seat === state.current && showOrders ? Battle.orderDestination(state, selected) : null;
+    return {
+      selectedId: ui.playing ? null : ui.selectedId,
+      highlights: ui.playing ? [] : highlightsFor(selected),
+      route: destination && !sameHex(destination, selected.pos) ? { from: selected.pos, to: destination } : null,
+      orderIconFor: showOrders ? (u) => (u.seat === state.current ? ORDERS[u.order.kind].icon : null) : null,
+      generalEmoji: players.map((p) => p.emoji),
+      generalSprite: players.map((p) => p.sprite),
+      popups: ui.popups,
+    };
+  }
+
+  // ===== 行動アニメーション =====
+  const easeOut = (t) => 1 - (1 - t) ** 2;
+
+  function addPopup(hex, text, color) {
+    ui.popups.push({ hex, text, color, startedAt: performance.now(), duration: POPUP_MS / (ui.playing?.speed ?? 1) });
+  }
+
+  function unitIn(view, id) {
+    return view.units.find((u) => u.id === id) ?? null;
+  }
+
+  /** 出来事が始まった瞬間の音・数字の演出 */
+  function onEventStart(ev, prevView) {
+    if (ui.playing.speed > FAST_SPEED) return; // 「最後までとばす」中は音も数字も出さない
+    const now = performance.now();
+    if (ev.type === 'move' && now - ui.lastMoveSoundAt > MOVE_SOUND_GAP_MS) {
+      ui.lastMoveSoundAt = now;
+      Sound.play('move', { seat: seatOfUnitId(ev.unitId) });
+    }
+    if (ev.type === 'attack' || ev.type === 'counter') {
+      const target = unitIn(prevView, ev.defenderId);
+      Sound.play(ev.ranged ? 'shoot' : 'clash');
+      if (target) addPopup(target.pos, `-${ev.damage}`, ev.type === 'counter' ? '#7a4a00' : '#b3261e');
+    }
+    if (ev.type === 'destroyed') Sound.play('destroy');
+    if (ev.type === 'capture') { Sound.play('castle'); addPopup(ev.hex, '🏯占領!', '#8a6200'); }
+    if (ev.type === 'enclose') { Sound.play('capture'); addPopup(ev.cells[0], `包囲 +${ev.cells.length}`, SEATS[ev.seat].dark); }
+    if (ev.type === 'item') {
+      Sound.play('item');
+      const u = unitIn(ev.snap, ev.unitId) ?? unitIn(prevView, ev.unitId);
+      if (u) addPopup(u.pos, `${Battle.ITEMS[ev.kind].icon}${Battle.ITEMS[ev.kind].name}`, '#1d6b3a');
+    }
+    if (ev.type === 'heal') ev.unitIds.forEach((id) => { const u = unitIn(ev.snap, id); if (u) addPopup(u.pos, `+${ev.amount}`, '#1d7a3a'); });
+    if (ev.type === 'itemSpawn') { Sound.play('arm'); showToast(`${Battle.ITEMS[ev.kind].icon} ${Battle.ITEMS[ev.kind].name}が現れた！`, state.current, 1300); }
+  }
+
+  /** 再生中の1コマの盤面とオーバーレイ */
+  function playbackFrame(now) {
+    const p = ui.playing;
+    let ev = p.events[p.index];
+    while (ev) {
+      if (!p.started) {
+        p.started = true;
+        p.startedAt = now;
+        onEventStart(ev, p.view);
+      }
+      const t = Math.min(1, ((now - p.startedAt) * p.speed) / (EVENT_MS[ev.type] ?? 200));
+      if (t < 1) return { view: frameView(p, ev, t), extra: frameExtra(p, ev, t) };
+      p.view = { ...p.view, ...ev.snap };
+      p.index += 1;
+      p.started = false;
+      ev = p.events[p.index];
+    }
+    finishPlayback();
+    return null;
+  }
+
+  function frameView(p, ev, t) {
+    if (ev.type === 'attack' || ev.type === 'counter') return t < 0.6 ? p.view : { ...p.view, ...ev.snap };
+    return { ...p.view, ...ev.snap };
+  }
+
+  function frameExtra(p, ev, t) {
+    if (ev.type === 'move') return { moving: { unitId: ev.unitId, from: ev.from, to: ev.to, t: easeOut(t) } };
+    if (ev.type === 'attack' || ev.type === 'counter') {
+      const a = unitIn(p.view, ev.attackerId);
+      const d = unitIn(p.view, ev.defenderId);
+      return a && d ? { shot: { from: a.pos, to: d.pos, t: Math.min(1, t / 0.6), ranged: Boolean(ev.ranged) } } : {};
+    }
+    if (ev.type === 'destroyed') {
+      const gone = unitIn(p.view, ev.unitId);
+      return gone ? { fading: [{ unit: gone, t }] } : {};
+    }
+    return {};
+  }
+
+  function startPlayback(before, events, onDone) {
+    ui.selectedId = null;
+    ui.targeting = null;
+    ui.playing = { events, index: 0, started: false, startedAt: 0, view: viewOf(before), speed: 1, onDone };
+    refresh();
+  }
+
+  function finishPlayback() {
+    const done = ui.playing?.onDone;
+    ui.playing = null;
+    refresh();
+    if (done) done();
+  }
+
+  // ===== 描画ループ =====
+  function loop(now) {
+    if (state) {
+      ui.popups = ui.popups.filter((p) => now - p.startedAt < p.duration);
+      const frame = ui.playing ? playbackFrame(now) : null;
+      board.draw(frame ? frame.view : viewOf(state), { ...baseOverlay(), ...(frame ? frame.extra : {}) }, now);
+    }
+    requestAnimationFrame(loop);
+  }
+
+  // ===== 盤面のタップ =====
+  function onBoardTap(ev) {
+    if (!state || ui.playing || state.phase === 'over' || screens.isAnyOpen()) return;
+    const rect = canvas.getBoundingClientRect();
+    const hex = board.hexFromPoint(ev.clientX - rect.left, ev.clientY - rect.top);
+    if (!hex) return;
+    if (ui.targeting) {
+      handleTargetTap(hex);
       return;
     }
-    const next = players[state.current];
-    const isSamePlayer = state.lastPassed || state.lastExtraTurn;
-    lines.push(state.lastExtraTurn ? 'もう1歩どうぞ！' : `${isSamePlayer ? '続けて' : '次は'} ${next.emoji} ${next.name}`);
-    const extraMs = (lines.length - 2) * 400;
-    showToast(lines.join('\n'), `p${moverId + 1} capture`, CAPTURE_TOAST_MS + Math.max(0, extraMs));
+    const tapped = Battle.unitAt(state, hex);
+    const selected = ui.selectedId ? Battle.unitById(state, ui.selectedId) : null;
+    if (tapped) {
+      ui.selectedId = tapped.id === ui.selectedId ? null : tapped.id;
+      Sound.play('tick');
+    } else if (state.phase === 'deploy' && selected?.seat === state.current) {
+      const reason = Battle.deployBlockedReason(state, selected.id, hex);
+      if (reason) flash(reason);
+      else { state = Battle.deployMove(state, selected.id, hex); Sound.play('move', { seat: state.current }); }
+    } else {
+      ui.selectedId = null;
+    }
+    refresh();
   }
 
-  let resultTimer = 0;
-  function announceResult() {
-    showToast('🏯 合戦終了！', 'end', RESULT_DELAY_MS);
-    clearTimeout(resultTimer);
-    resultTimer = setTimeout(() => {
+  function handleTargetTap(hex) {
+    const unitId = ui.selectedId;
+    if (ui.targeting === 'advance') {
+      if (!Battle.canEnterHex(state, unitId, hex)) { flash('そのマスには入れない'); return; }
+      applyOrder(unitId, { kind: 'advance', target: { hex } });
+    } else if (ui.targeting === 'attack') {
+      const enemy = Battle.unitAt(state, hex);
+      if (!enemy || enemy.seat === state.current) { flash('敵の部隊をタップしてね'); return; }
+      applyOrder(unitId, { kind: 'attack', target: { unitId: enemy.id } });
+    } else if (ui.targeting === 'fort') {
+      if (!Battle.fortTargets(state).some((h) => sameHex(h, hex))) { flash('金色のマスを選んでね'); return; }
+      activateSkill(hex);
+    }
+  }
+
+  function applyOrder(unitId, order) {
+    const next = Battle.setOrder(state, unitId, order);
+    ui.targeting = null;
+    if (next === state) { flash('その命令は出せない'); return; }
+    state = next;
+    Sound.play('arm');
+    refresh();
+  }
+
+  // ===== パネルの操作 =====
+  function onOrder(orderKey) {
+    const unit = Battle.unitById(state, ui.selectedId);
+    if (!unit) return;
+    const reason = Battle.orderBlockedReason(state, unit.id, orderKey);
+    if (reason) { Sound.play('pass'); flash(reason); return; }
+    const need = ORDERS[orderKey].needsTarget;
+    if (need === 'hex') { ui.targeting = 'advance'; Sound.play('tick'); refresh(); return; }
+    if (need === 'enemy') { ui.targeting = 'attack'; Sound.play('tick'); refresh(); return; }
+    applyOrder(unit.id, { kind: orderKey, target: null });
+  }
+
+  function onAction(action) {
+    if (action === 'fastForward') {
+      if (!ui.playing) return;
+      if (ui.playing.speed > 1) ui.playing.speed = 1000;
+      else ui.playing.speed = FAST_SPEED;
+      renderPanel();
+    } else if (action === 'showResult') openResult();
+    else if (action === 'cancelTarget') { ui.targeting = null; Sound.play('tick'); refresh(); }
+    else if (action === 'nearestEnemy') applyOrder(ui.selectedId, { kind: 'attack', target: null });
+    else if (action === 'skill') onSkill();
+    else if (action === 'finishDeploy') finishDeploy();
+    else if (action === 'endTurn') endTurn();
+  }
+
+  function onSkill() {
+    const reason = state.phase === 'deploy' ? '合戦が始まってから使える' : Battle.skillBlockedReason(state);
+    if (reason) { Sound.play('pass'); flash(reason); return; }
+    const skill = SKILLS[players[state.current].skill];
+    if (skill.needsTarget === 'hex') {
+      if (Battle.fortTargets(state).length === 0) { flash('城を建てられる平地が近くにない'); return; }
+      ui.selectedId = null;
+      ui.targeting = 'fort';
+      Sound.play('arm');
+      refresh();
+      return;
+    }
+    screens.confirm({
+      title: `${skill.icon} ${skill.name}を使う？`,
+      text: `${skill.desc}（1回だけ）`,
+      yesLabel: '使う！',
+      onYes: () => activateSkill(null),
+    });
+  }
+
+  function activateSkill(hex) {
+    const skill = SKILLS[players[state.current].skill];
+    state = Battle.useSkill(state, hex);
+    ui.targeting = null;
+    Sound.play('skill');
+    showToast(`${skill.icon} ${skill.name}！`, state.current, 1600);
+    refresh();
+  }
+
+  // ===== 手番の流れ =====
+  function finishDeploy() {
+    const prev = state.current;
+    state = Battle.finishDeploy(state);
+    ui.selectedId = null;
+    refresh();
+    if (state.phase === 'deploy') {
+      handoff(state.current, `${SEATS[state.current].label}の布陣`, `${players[prev].name}側の人は見ないでね。部隊を並べて、最初の命令を決めよう。`);
+    } else {
+      handoff(0, '合戦開始！', 'スマホを赤の陣に渡してください。', [], () => Sound.play('start'));
+    }
+  }
+
+  function endTurn() {
+    const mover = state.current;
+    const before = state;
+    const result = Battle.endTurn(state);
+    state = result.state;
+    startPlayback(before, result.events, () => afterTurn(mover, result.events));
+  }
+
+  function afterTurn(mover, events) {
+    if (state.phase === 'over') {
       Sound.play('win');
       openResult();
-    }, RESULT_DELAY_MS);
-  }
-  const openResult = () => screens.showResult(players, countScore(state));
-
-  /** 1手の効果音：まず移動/技の音、続けて包囲・城・パスの音を少しずつずらして鳴らす */
-  function playActionSounds(moverId, isSkill) {
-    Sound.play(isSkill ? 'skill' : 'move', { seat: moverId });
-    const followUps = [
-      state.lastCaptured.length > 0 && 'capture',
-      state.lastCastles > 0 && 'castle',
-      state.lastPassed && 'pass',
-    ].filter(Boolean);
-    const offset = isSkill ? SKILL_SOUND_MS : 0;
-    followUps.forEach((name, i) => setTimeout(() => Sound.play(name), offset + FOLLOWUP_SOUND_MS * (i + 1)));
-  }
-
-  let state = createInitialState();
-
-  function onTap(ev) {
-    if (state.isOver) return;
-    const rect = canvas.getBoundingClientRect();
-    const hex = pixelToHex(ev.clientX - rect.left, ev.clientY - rect.top);
-    if (!hex) return;
-    if (!currentTargets().some((m) => sameHex(m, hex))) return;
-
-    const mover = state.current;
-    const isSkill = isSkillMode;
-    state = isSkill ? applySkill(state, hex) : applyMove(state, hex);
-    isSkillMode = false;
-    updateHud();
-    const popped = [...state.lastSkillPaint, ...state.lastCaptured];
-    if (popped.length > 0) startCaptureAnim(popped);
-    playActionSounds(mover, isSkill);
-
-    if (state.isOver) announceResult();
-    else announceAction(mover, isSkill);
-  }
-
-  function onSkillButton() {
-    if (state.isOver) {
-      openResult();
       return;
     }
-    if (!canUseSkill(state)) return;
-    isSkillMode = !isSkillMode;
-    Sound.play(isSkillMode ? 'arm' : 'tick');
-    updateSkillUi();
+    const seat = state.current;
+    handoff(seat, `${SEATS[seat].label}の番（${state.turn}/${Battle.CONFIG.maxTurns}ターン）`,
+      'スマホを渡してください。', summarize(mover, events));
+  }
+
+  /** 交代画面に出す「さっきの番に起きたこと」 */
+  function summarize(mover, events) {
+    const enemy = 1 - mover;
+    const damageTo = [0, 0];
+    const lostUnits = [[], []];
+    let captures = 0;
+    let enclosed = 0;
+    const items = [];
+    events.forEach((e) => {
+      if (e.type === 'attack' || e.type === 'counter') damageTo[seatOfUnitId(e.defenderId)] += e.damage;
+      if (e.type === 'destroyed') lostUnits[e.seat].push(e.unitType === 'general' ? `${players[e.seat].emoji}本陣` : `${UNIT_TYPES[e.unitType].icon}${UNIT_TYPES[e.unitType].name}隊`);
+      if (e.type === 'capture') captures += 1;
+      if (e.type === 'enclose') enclosed += e.cells.length;
+      if (e.type === 'item' && seatOfUnitId(e.unitId) === mover) items.push(`${Battle.ITEMS[e.kind].icon}${Battle.ITEMS[e.kind].name}`);
+    });
+    const m = players[mover];
+    const lines = [`${SEATS[mover].dot} ${m.name}軍の行動`];
+    if (damageTo[enemy]) lines.push(`⚔️ 敵に ${damageTo[enemy]} の損害`);
+    if (damageTo[mover]) lines.push(`🩸 反撃などで ${damageTo[mover]} の損害`);
+    if (lostUnits[enemy].length) lines.push(`💥 撃破：${lostUnits[enemy].join('・')}`);
+    if (lostUnits[mover].length) lines.push(`😵 失った部隊：${lostUnits[mover].join('・')}`);
+    if (captures) lines.push(`🏯 城を ${captures} つ占領`);
+    if (enclosed) lines.push(`🔁 包囲で ${enclosed} マス獲得`);
+    if (items.length) lines.push(`🎁 ${items.join('・')} を入手`);
+    if (lines.length === 1) lines.push('大きな動きはなし');
+    return lines;
+  }
+
+  function handoff(seat, title, text, summary = [], onGo = null) {
+    screens.showHandoff({
+      player: players[seat], title, text, summary,
+      onGo: () => { Sound.play('tick'); if (onGo) onGo(); refresh(); },
+    });
+  }
+
+  function openResult() {
+    screens.showResult(players, {
+      winner: state.winner,
+      reason: state.endReason,
+      scores: [Battle.score(state, 0), Battle.score(state, 1)],
+    });
   }
 
   /** 選ばれた武将で新しい合戦を始める（地形も毎回作り直し） */
   function startGame(generalKeys) {
-    clearTimeout(resultTimer);
     players = buildPlayers(generalKeys);
-    state = createInitialState();
-    isSkillMode = false;
-    captureAnim = { keys: new Map(), startedAt: 0 };
-    updatePlayerPanels();
-    updateHud();
-    announceTurn();
+    state = Battle.create({ generalKeys, seed: Math.floor(Math.random() * 2 ** 31) });
+    ui.selectedId = null;
+    ui.targeting = null;
+    ui.playing = null;
+    ui.popups = [];
+    board.resize();
+    refresh();
     Sound.play('start');
+    handoff(0, `${SEATS[0].label}の布陣`, `${players[1].name}側の人は見ないでね。部隊を並べて、最初の命令を決めよう。`);
   }
 
-  const currentKeys = () => players.map((p) => p.key);
+  const currentKeys = () => (players.length ? players.map((p) => p.key) : []);
 
   const screens = Screens.create({
     generals: Generals.GENERALS,
@@ -631,14 +510,10 @@
     onRematch: () => startGame(currentKeys()),
   });
 
-  canvas.addEventListener('pointerdown', onTap);
-  el.skill.addEventListener('click', onSkillButton);
-  el.reset.addEventListener('click', () => {
-    const isMidGame = state.turn > 1 && !state.isOver;
-    if (!isMidGame) {
-      screens.showSelect(currentKeys());
-      return;
-    }
+  canvas.addEventListener('pointerdown', onBoardTap);
+  $('resetBtn').addEventListener('click', () => {
+    const isMidGame = state && state.phase !== 'over' && !(state.phase === 'deploy' && state.current === 0);
+    if (!isMidGame) { screens.showSelect(currentKeys()); return; }
     screens.confirm({
       title: 'いまの合戦をやめますか？',
       text: '盤面は消えて、武将選びからやり直しになります。',
@@ -646,18 +521,21 @@
       onYes: () => screens.showSelect(currentKeys()),
     });
   });
-  window.addEventListener('resize', computeLayout);
-  new ResizeObserver(computeLayout).observe(canvas);
+  window.addEventListener('resize', () => board.resize());
+  new ResizeObserver(() => board.resize()).observe(canvas);
 
-  computeLayout();
-  updatePlayerPanels();
-  updateHud();
-  requestRender();
-  screens.showSelect(currentKeys());
+  board.resize();
+  requestAnimationFrame(loop);
+  screens.showSelect(['nobu', 'shin']);
 
-  // デバッグ・拡張用に一部を公開
+  // デバッグ・動作確認用
   window.HexGame = {
-    grid, SKILLS, getState: () => state, startGame,
-    rules: { findEnclosedCells, legalMoves, applyMove, applySkill, advanceTurn, countScore },
+    getState: () => state, getUi: () => ui, startGame, board,
+    /** 再生中のアニメを最後まで一気に進める（画面が裏にあって描画が止まるときの確認用） */
+    flushPlayback: () => {
+      if (!ui.playing) return;
+      ui.playing.speed = 1e6;
+      while (ui.playing) playbackFrame(performance.now() + 1e9);
+    },
   };
 })();

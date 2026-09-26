@@ -1,7 +1,7 @@
 {
   "name": "どうぶつ戦国 陣取り合戦",
   "short_name": "どうぶつ戦国",
-  "description": "夫婦で遊べる、動物武将たちのヘクス陣取りゲーム（1台で交互に操作）",
+  "description": "夫婦で遊べる、動物武将たちの合戦ゲーム（1台で交互に操作）",
   "lang": "ja",
   "start_url": "./index.html",
   "scope": "./",

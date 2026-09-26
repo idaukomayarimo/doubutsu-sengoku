@@ -4,18 +4,23 @@
  * ▼ ファイルを更新して公開し直したら、CACHE_VERSION の数字を1つ上げてください。
  *   そうしないと、スマホに古い版が残り続けます。
  */
-const CACHE_VERSION = 'v1';
+const CACHE_VERSION = 'v2';
 const CACHE_NAME = `doubutsu-sengoku-${CACHE_VERSION}`;
 
 const APP_FILES = [
   './',
   './index.html',
+  './style.css',
   './screens.css',
   './sound.js',
   './hex.js',
   './terrain.js',
+  './units.js',
   './generals.js',
   './skills.js',
+  './battle.js',
+  './render.js',
+  './panel.js',
   './screens.js',
   './game.js',
   './manifest.webmanifest',

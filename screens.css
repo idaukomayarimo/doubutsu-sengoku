@@ -103,3 +103,30 @@ img.result-face-img { width: 88px; height: 88px; object-fit: contain; }
 .overlay.dim { align-items: center; background: #3b2a1acc; z-index: 20; }
 .confirm-title { font-size: 20px; text-align: center; text-wrap: balance; }
 .confirm-text { margin: 0 0 6px; font-size: 14px; text-align: center; opacity: .8; }
+
+/* ===== v2：武将カードの編成・交代画面・得点表 ===== */
+.card-army { font-size: 11px; margin-top: 2px; }
+.card-army b { font-size: 14px; }
+.card-units { display: flex; flex-wrap: wrap; justify-content: center; gap: 3px; margin: 2px 0; }
+.army-chip { font-size: 10px; padding: 1px 5px; border-radius: 999px; background: #0000000d; white-space: nowrap; }
+.handoff-card { gap: 8px; }
+#handoffScreen[data-seat="1"] .handoff-card { border-color: var(--red); }
+#handoffScreen[data-seat="2"] .handoff-card { border-color: var(--blue); }
+#handoffScreen[data-seat="1"] h2 { color: var(--red); }
+#handoffScreen[data-seat="2"] h2 { color: var(--blue); }
+#handoffScreen[data-seat="1"] #handoffGo { background: var(--red); }
+#handoffScreen[data-seat="2"] #handoffGo { background: var(--blue); }
+.handoff-card h2 { margin: 0; font-size: 20px; text-align: center; text-wrap: balance; }
+.handoff-summary {
+  align-self: stretch; margin: 0; padding: 8px 12px 8px 26px;
+  border-radius: 12px; background: #0000000a; font-size: 13px; line-height: 1.6;
+}
+.handoff-summary li:first-child { list-style: none; margin-left: -14px; font-weight: 900; }
+.score-table { border-collapse: collapse; font-size: 13px; margin: 4px 0 8px; font-variant-numeric: tabular-nums; }
+.score-table th, .score-table td { padding: 4px 8px; text-align: center; border-bottom: 1px solid #0001; }
+.score-table tbody th { text-align: left; font-weight: 700; opacity: .8; }
+.score-table .seat1 { color: var(--red); }
+.score-table .seat2 { color: var(--blue); }
+
+/* 選択画面の右上の音ボタン */
+.sound-btn { background: #fff; color: var(--ink); border: 2px solid #0002; box-shadow: 0 3px 0 #0002; }

@@ -22,6 +22,10 @@ window.Sound = (() => {
     castle: null,
     pass: null,
     tick: null,
+    clash: null,     // 近接攻撃
+    shoot: null,     // 弓・鉄砲
+    destroy: null,   // 部隊を撃破
+    item: null,      // アイテム入手
     start: null,     // 例) 'sound/horagai.mp3'（ほら貝）
     win: null,
   };
@@ -36,6 +40,10 @@ window.Sound = (() => {
     pass: [60, 50, 60],
     start: [30, 60, 120],
     win: [100, 60, 100, 60, 250],
+    clash: 15,
+    shoot: 10,
+    destroy: [60, 40, 120],
+    item: [15, 30, 15],
   };
 
   const MASTER_VOLUME = 0.6;
@@ -180,6 +188,27 @@ window.Sound = (() => {
       tone({ freq: 220, freqEnd: 150, dur: 0.18, vol: 0.12, type: 'square', lowpass: 1200 });
       tone({ freq: 200, freqEnd: 130, dur: 0.25, vol: 0.12, type: 'square', lowpass: 1200, delay: 0.2 });
     },
+    // 近接攻撃：かきん（金属音）
+    clash: () => {
+      noise({ dur: 0.08, vol: 0.25, lowpass: 5000 });
+      tone({ freq: 1800, freqEnd: 1400, dur: 0.12, vol: 0.08, type: 'square', lowpass: 4000 });
+    },
+    // 弓・鉄砲：ぱんっ
+    shoot: () => {
+      noise({ dur: 0.14, vol: 0.35, lowpass: 2200 });
+      tone({ freq: 320, freqEnd: 90, dur: 0.12, vol: 0.2 });
+    },
+    // 撃破：どどーん
+    destroy: () => {
+      taiko(0, 0.9);
+      noise({ dur: 0.4, vol: 0.2, lowpass: 600, delay: 0.05 });
+      tone({ freq: 110, freqEnd: 40, dur: 0.6, vol: 0.3, delay: 0.1 });
+    },
+    // アイテム入手：ちゃりん
+    item: () => {
+      tone({ freq: YO.B5, dur: 0.12, vol: 0.14, type: 'triangle' });
+      tone({ freq: YO.E6, dur: 0.3, vol: 0.14, type: 'triangle', delay: 0.08 });
+    },
     // 選択画面のタップ：こつ
     tick: () => tone({ freq: 1250, dur: 0.05, vol: 0.12, type: 'triangle' }),
     // 出陣：ほら貝「ぶおぉ〜」
@@ -235,7 +264,9 @@ window.Sound = (() => {
    */
   function play(name, opts) {
     if (isMuted) return;
-    if (HAPTICS[name] && navigator.vibrate) navigator.vibrate(HAPTICS[name]);
+    // ブラウザは「画面に一度触れるまで」振動を許さないので、それまでは呼ばない
+    const hasTouched = navigator.userActivation ? navigator.userActivation.hasBeenActive : true;
+    if (HAPTICS[name] && navigator.vibrate && hasTouched) navigator.vibrate(HAPTICS[name]);
 
     unlock();
     if (!ctx) return;

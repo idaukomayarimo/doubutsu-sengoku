@@ -1,5 +1,5 @@
 /*
- * 画面遷移：武将選択画面 / 結果画面（DOM オーバーレイ）
+ * 画面遷移：武将選択画面 / 交代画面 / 結果画面 / 確認画面（DOM オーバーレイ）
  *
  * 選択の流れ（1台を交互に持つ前提）：
  *   赤の陣が選ぶ → 決定 → 青の陣が選ぶ（赤が選んだ武将は選べない）→ 出陣！
@@ -30,6 +30,7 @@ window.Screens = (() => {
       resultFace: $('resultFace'),
       resultTitle: $('resultTitle'),
       resultScore: $('resultScore'),
+      resultReason: $('resultReason'),
       rematch: $('rematchBtn'),
       reselect: $('reselectBtn'),
       viewBoard: $('viewBoardBtn'),
@@ -56,9 +57,25 @@ window.Screens = (() => {
             <span class="card-name">${g.name}</span>
             <span class="card-model">モデル：${g.model}</span>
             <span class="card-catch">${g.catchphrase}</span>
+            <span class="card-army">軍勢 <b>${Generals.totalTroops(g)}</b>・采配 <b>${g.command}</b></span>
+            <span class="card-units">${armyHtml(g)}</span>
             <span class="card-skill">${skill.icon} ${skill.name}</span>
             <span class="card-desc">${skill.desc}</span>
           </button>`;
+      }).join('');
+    }
+
+    /** 編成を「🔫60×2」のように同じ兵種・兵数をまとめて表示 */
+    function armyHtml(g) {
+      const groups = [];
+      g.army.forEach(([type, n]) => {
+        const last = groups[groups.length - 1];
+        if (last && last.type === type && last.n === n) last.count += 1;
+        else groups.push({ type, n, count: 1 });
+      });
+      return groups.map(({ type, n, count }) => {
+        const icon = type === 'general' ? g.emoji : Units.UNIT_TYPES[type].icon;
+        return `<span class="army-chip" title="${Units.UNIT_TYPES[type].name}">${icon}${n}${count > 1 ? `×${count}` : ''}</span>`;
       }).join('');
     }
 
@@ -108,20 +125,59 @@ window.Screens = (() => {
       el.select.hidden = false;
     }
 
-    function showResult(players, scores) {
-      const [s1, s2] = scores;
-      const isDraw = s1 === s2;
-      const winner = isDraw ? null : players[s1 > s2 ? 0 : 1];
-      el.result.dataset.seat = winner ? String(winner.id + 1) : 'draw';
-      el.resultFace.innerHTML = winner
-        ? faceHtml(winner, 'result-face-img')
+    /**
+     * @param {object[]} players 陣＋武将
+     * @param {{ winner: 0|1|'draw', reason: 'annihilation'|'turns', scores: object[] }} outcome
+     */
+    function showResult(players, { winner, reason, scores }) {
+      const champ = winner === 'draw' ? null : players[winner];
+      el.result.dataset.seat = champ ? String(champ.id + 1) : 'draw';
+      el.resultFace.innerHTML = champ
+        ? faceHtml(champ, 'result-face-img')
         : players.map((p) => faceHtml(p, 'result-face-img small')).join('');
-      el.resultTitle.textContent = winner ? `${winner.name}の天下！` : '引き分け！';
-      el.resultScore.innerHTML = players
-        .map((p, i) => `<span class="seat${i + 1}">${p.emoji} ${scores[i]}点</span>`)
-        .join('<span class="vs">対</span>');
+      el.resultTitle.textContent = champ ? `${champ.name}の天下！` : '引き分け！';
+      el.resultReason.textContent = reason === 'annihilation'
+        ? (champ ? `${players[1 - champ.id].name}の軍勢が全滅` : '両軍とも全滅')
+        : '50ターンが終わり、得点で決着';
+      const row = (label, pick) => `<tr><th>${label}</th>${scores.map((sc, i) => `<td class="seat${i + 1}">${pick(sc)}</td>`).join('')}</tr>`;
+      el.resultScore.innerHTML = `
+        <table class="score-table">
+          <thead><tr><th></th>${players.map((p, i) => `<th class="seat${i + 1}">${p.emoji} ${p.name}</th>`).join('')}</tr></thead>
+          <tbody>
+            ${row('領地', (sc) => `${sc.territory}点`)}
+            ${row('城', (sc) => `${sc.castles}城 = ${sc.castlePoints}点`)}
+            ${row('残った兵', (sc) => `${sc.troops}点`)}
+            ${row('合計', (sc) => `<b>${sc.total}点</b>`)}
+          </tbody>
+        </table>`;
       el.result.hidden = false;
     }
+
+    // ===== 交代画面（1台を渡すとき、相手の画面を見ないように挟む） =====
+    const handoffEl = {
+      root: $('handoffScreen'), face: $('handoffFace'), title: $('handoffTitle'),
+      text: $('handoffText'), summary: $('handoffSummary'), go: $('handoffGo'),
+    };
+    let onHandoffGo = null;
+
+    /** @param {{ player: object, title: string, text: string, summary?: string[], onGo: () => void }} opts */
+    function showHandoff({ player, title, text, summary = [], onGo }) {
+      handoffEl.root.dataset.seat = String(player.id + 1);
+      handoffEl.face.innerHTML = faceHtml(player, 'result-face-img');
+      handoffEl.title.textContent = title;
+      handoffEl.text.textContent = text;
+      handoffEl.summary.innerHTML = summary.map((line) => `<li>${line}</li>`).join('');
+      handoffEl.summary.hidden = summary.length === 0;
+      onHandoffGo = onGo;
+      handoffEl.root.hidden = false;
+      handoffEl.go.focus();
+    }
+    handoffEl.go.addEventListener('click', () => {
+      handoffEl.root.hidden = true;
+      const go = onHandoffGo;
+      onHandoffGo = null;
+      if (go) go();
+    });
 
     el.rematch.addEventListener('click', () => {
       el.result.hidden = true;
@@ -158,7 +214,9 @@ window.Screens = (() => {
       closeConfirm();
     });
 
-    return { showSelect, showResult, confirm };
+    const isAnyOpen = () => [el.select, el.result, handoffEl.root, confirmEl.root].some((r) => !r.hidden);
+
+    return { showSelect, showResult, showHandoff, confirm, isAnyOpen };
   }
 
   return { create };

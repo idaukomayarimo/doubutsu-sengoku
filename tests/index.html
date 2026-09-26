@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>どうぶつ戦国 ルールのテスト</title>
+  <style>
+    body { font: 14px/1.5 system-ui, sans-serif; margin: 16px; background: #fff4dc; color: #3b2a1a; }
+    h1 { font-size: 18px; margin: 0 0 8px; }
+    #summary { font-weight: 800; margin-bottom: 12px; }
+    .pass { color: #1d7a3a; }
+    .fail { color: #b3261e; font-weight: 700; }
+    li { margin: 2px 0; }
+    pre { white-space: pre-wrap; margin: 2px 0 6px 16px; color: #b3261e; }
+  </style>
+</head>
+<body>
+  <h1>ルールエンジンのテスト</h1>
+  <div id="summary">実行中…</div>
+  <ol id="results"></ol>
+
+  <script src="../hex.js"></script>
+  <script src="../terrain.js"></script>
+  <script src="../units.js"></script>
+  <script src="../generals.js"></script>
+  <script src="../skills.js"></script>
+  <script src="../battle.js"></script>
+  <script src="runner.js"></script>
+  <script src="battle.test.js"></script>
+  <script>TestRunner.run();</script>
+</body>
+</html>
