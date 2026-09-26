@@ -1,0 +1,5 @@
+# claude.ai 公開用のビルド出力（tools/build-artifact.sh で毎回作り直す）
+artifact.html
+
+# ローカル設定
+.claude/settings.local.json

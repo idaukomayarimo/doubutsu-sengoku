@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#fff4dc" />
+  <meta name="description" content="夫婦で遊べる、動物武将たちのヘクス陣取りゲーム（1台で交互に操作）" />
+  <!-- pwa:start ホーム画面に追加したとき、アプリのように全画面で開く設定 -->
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="どうぶつ戦国" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <!-- pwa:end -->
+  <title>どうぶつ戦国 陣取り合戦</title>
+  <style>
+    :root {
+      --bg: #fff4dc;
+      --ink: #3b2a1a;
+      --red: #e8453c;
+      --blue: #2f7de1;
+      --panel: #ffffffcc;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      margin: 0; height: 100%; overflow: hidden;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "Hiragino Maru Gothic ProN", "Rounded Mplus 1c", "M PLUS Rounded 1c", system-ui, sans-serif;
+      touch-action: manipulation;
+      user-select: none; -webkit-user-select: none;
+    }
+    #app {
+      display: flex; flex-direction: column;
+      height: 100%;
+      /* 切り欠き・ホームバーを避ける余白。外側で既に確保される環境では 0 に上書きする */
+      padding: var(--app-safe-top, env(safe-area-inset-top)) 16px var(--app-safe-bottom, env(safe-area-inset-bottom));
+    }
+    header {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      padding: 10px 0 6px;
+    }
+    .player {
+      flex: 1; display: flex; align-items: center; gap: 6px;
+      padding: 6px 10px; border-radius: 999px;
+      background: var(--panel); border: 3px solid transparent;
+      font-weight: 800; font-size: 14px;
+      transition: transform .2s, border-color .2s, opacity .2s;
+      opacity: .55;
+    }
+    .player.p2 { flex-direction: row-reverse; text-align: right; }
+    .player .face { font-size: 22px; }
+    .player .score { margin-left: auto; font-size: 18px; }
+    .player.p2 .score { margin-left: 0; margin-right: auto; }
+    .player.active { opacity: 1; transform: scale(1.04); }
+    .player.p1.active { border-color: var(--red); }
+    .player.p2.active { border-color: var(--blue); }
+    #turnInfo { font-size: 12px; font-weight: 800; text-align: center; min-width: 52px; white-space: pre-line; line-height: 1.2; }
+    #stage { position: relative; flex: 1; min-height: 0; }
+    #board { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+    footer { display: flex; justify-content: center; gap: 10px; padding: 8px 0 12px; }
+    .player .face { position: relative; }
+    .player .name { white-space: nowrap; font-size: 13px; }
+    .skill-badge {
+      position: absolute; right: -6px; bottom: -4px;
+      width: 16px; height: 16px; border-radius: 50%;
+      background: #fff; box-shadow: 0 1px 2px #0003;
+      font-size: 10px; line-height: 16px; text-align: center;
+      transition: opacity .2s, filter .2s;
+    }
+    .skill-badge.used { opacity: .35; filter: grayscale(1); }
+    #skillBtn {
+      flex: 1; max-width: 300px;
+      display: flex; flex-direction: column; align-items: center; gap: 2px;
+      padding: 8px 16px; background: var(--red); line-height: 1.25;
+    }
+    #skillBtn[data-player="2"] { background: var(--blue); }
+    #skillBtn small { font-size: 11px; font-weight: 700; opacity: .9; }
+    #skillBtn.armed {
+      background: #f5b400; color: var(--ink);
+      animation: glow 1s ease-in-out infinite alternate;
+    }
+    #skillBtn:disabled { background: #bbb; color: #fff; box-shadow: none; }
+    @keyframes glow { from { box-shadow: 0 4px 0 #0003, 0 0 0 0 #f5b40088; } to { box-shadow: 0 4px 0 #0003, 0 0 0 8px #f5b40000; } }
+    #resetBtn { font-size: 20px; padding: 10px 16px; }
+    .sound-btn { font-size: 18px; padding: 10px 12px; background: #fff; box-shadow: 0 4px 0 #0002; border: 2px solid #0002; }
+    button {
+      font: inherit; font-weight: 800; font-size: 15px;
+      padding: 10px 22px; border-radius: 999px; border: none;
+      background: var(--ink); color: #fff; cursor: pointer;
+      box-shadow: 0 4px 0 #00000033;
+    }
+    button:active { transform: translateY(2px); box-shadow: 0 2px 0 #00000033; }
+    #toast {
+      position: absolute; left: 50%; top: 50%;
+      transform: translate(-50%, -50%) scale(.8);
+      padding: 14px 26px; border-radius: 20px;
+      background: #fff; font-size: 22px; font-weight: 900;
+      box-shadow: 0 8px 24px #0003;
+      opacity: 0; pointer-events: none; white-space: pre; text-align: center; line-height: 1.4;
+      transition: opacity .25s, transform .25s;
+    }
+    #toast.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    #toast.p1 { color: var(--red); border: 4px solid var(--red); }
+    #toast.p2 { color: var(--blue); border: 4px solid var(--blue); }
+    #toast.end { pointer-events: auto; }
+    #toast.capture { font-size: 20px; animation: shake .4s; }
+    @keyframes shake {
+      0%, 100% { rotate: 0deg; }
+      25% { rotate: -4deg; }
+      75% { rotate: 4deg; }
+    }
+    .hint { font-size: 12px; font-weight: 700; opacity: .7; text-align: center; margin: 0 0 6px; }
+    #skillBtn[data-player="end"] { background: var(--ink); }
+  </style>
+  <link rel="stylesheet" href="screens.css" />
+</head>
+<body>
+  <div id="app">
+    <header>
+      <div class="player p1" id="p1Panel"><span class="face"><span id="p1Emoji">🐱</span><span class="skill-badge" id="p1Skill"></span></span><span class="name" id="p1Name">のぶネコ</span><span class="score" id="p1Score">1</span></div>
+      <div id="turnInfo"></div>
+      <div class="player p2" id="p2Panel"><span class="face"><span id="p2Emoji">🐯</span><span class="skill-badge" id="p2Skill"></span></span><span class="name" id="p2Name">しんタイガー</span><span class="score" id="p2Score">1</span></div>
+    </header>
+    <div id="stage">
+      <canvas id="board"></canvas>
+      <div id="toast"></div>
+    </div>
+    <p class="hint">囲むと中が一気に領地に！（外周・武将の所は除く）<br>🏯 城は1マス3点　⛰️ 山は通れないけど、囲むときの壁になる<br>技はそれぞれ1回だけ。ここぞで使おう！</p>
+    <footer>
+      <button id="skillBtn" type="button">
+        <span id="skillName"></span>
+        <small id="skillDesc"></small>
+      </button>
+      <button type="button" class="sound-btn" data-sound-toggle></button>
+      <button id="resetBtn" type="button" aria-label="武将選びからやり直す" title="武将選びからやり直す">↺</button>
+    </footer>
+  </div>
+
+  <!-- 武将選択画面 -->
+  <section id="selectScreen" class="overlay" hidden>
+    <div class="overlay-inner">
+      <button type="button" class="sound-btn corner" data-sound-toggle></button>
+      <h1 class="title">どうぶつ戦国<span>陣取り合戦</span></h1>
+      <p class="select-step" id="selectStep"></p>
+      <div class="general-grid" id="generalGrid"></div>
+      <div class="select-actions">
+        <button type="button" id="selectBack" class="sub">← もどる</button>
+        <button type="button" id="selectGo" class="main"></button>
+      </div>
+      <details class="howto">
+        <summary>遊び方</summary>
+        <ul>
+          <li>交互に、武将の<b>隣のマス</b>へ移動。通ったマスが自分の領地になります。</li>
+          <li>自分の色で<b>ぐるっと囲む</b>と、中のマスが一気に自分のものに（外周に触れている所・武将がいる所は除く）。</li>
+          <li>🏯 城は1マス<b>3点</b>。⛰️ 山は通れないけど、囲むときの壁になります。</li>
+          <li>武将ごとの<b>技</b>は1回だけ。画面下のボタンから使えます。</li>
+          <li>各20手で終戦。得点の多い方の勝ち！</li>
+        </ul>
+      </details>
+    </div>
+  </section>
+
+  <!-- 結果画面 -->
+  <section id="resultScreen" class="overlay" hidden>
+    <div class="result-card">
+      <div class="result-face" id="resultFace"></div>
+      <h2 id="resultTitle"></h2>
+      <p class="result-score" id="resultScore"></p>
+      <button type="button" id="rematchBtn" class="main">同じ武将でもう一戦</button>
+      <button type="button" id="reselectBtn" class="sub">武将を選び直す</button>
+      <button type="button" id="viewBoardBtn" class="link">盤面を見る</button>
+    </div>
+  </section>
+
+  <!-- 確認画面（ブラウザの confirm() は埋め込み先で使えないことがあるため自前で用意） -->
+  <section id="confirmScreen" class="overlay dim" hidden>
+    <div class="result-card" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle">
+      <h2 id="confirmTitle" class="confirm-title"></h2>
+      <p id="confirmText" class="confirm-text"></p>
+      <button type="button" id="confirmYes" class="main"></button>
+      <button type="button" id="confirmNo" class="sub">キャンセル</button>
+    </div>
+  </section>
+
+  <script src="sound.js"></script>
+  <script src="hex.js"></script>
+  <script src="terrain.js"></script>
+  <script src="generals.js"></script>
+  <script src="skills.js"></script>
+  <script src="screens.js"></script>
+  <script src="game.js"></script>
+  <!-- pwa:start -->
+  <script>
+    // オフライン対応（sw.js）。ファイルを直接開いた場合（file://）は使えないので登録しない。
+    // 開発中の localhost では古いキャッシュが邪魔になるため、URL に ?sw を付けたときだけ有効にする。
+    const isLocalDev = ['localhost', '127.0.0.1'].includes(location.hostname);
+    const wantsSw = !isLocalDev || new URLSearchParams(location.search).has('sw');
+    if ('serviceWorker' in navigator && location.protocol.startsWith('http') && wantsSw) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js').catch((err) => {
+          console.warn('オフライン対応の登録に失敗しました（通常どおり遊べます）', err);
+        });
+      });
+    }
+  </script>
+  <!-- pwa:end -->
+</body>
+</html>
